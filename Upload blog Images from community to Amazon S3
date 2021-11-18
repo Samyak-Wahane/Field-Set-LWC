@@ -1,0 +1,67 @@
+public class BlogPostHelper {
+    public static void getBlogContentImages(Id blogId){
+        Blog__c record = [SELECT Id, Body__c from Blog__c where id = :blogId];
+        Matcher imgMatcher = Pattern.compile( '<img(.+?)>' ).matcher( record.Body__c);
+        String imageURL;
+        Blob b;
+        String referenceId;
+        List<String> referenceIdList = new List<String>();
+        List<String> imageurlList = new List<String>();
+        List<Blob> blobList = new List<Blob>();
+        while ( imgMatcher.find() ) {
+            String imageTag = imgMatcher.group();
+            imageURL = imageTag.substringBetween( ' src="', '"' );
+            imageurlList.add(imageURL);
+            String decodedURL = imageURL.unescapeHtml4();
+            referenceId = decodedURL.substringAfter('refid=');
+            referenceIdList.add(referenceId);
+            PageReference page = new PageReference( decodedURL );
+            if(Test.isRunningTest()) { 
+                b = blob.valueOf('Unit.Test');
+            } else {
+                b = page.getContent();
+            }
+            blobList.add(b);
+        }
+        uploadImageOnS3(referenceIdList, blobList);
+        List<String> CloudFrontUrl = new List<String>();
+        awsS3API__c apiUrl =  awsS3API__c.getValues('preSignedUrl');
+        String preSignedUrl = apiUrl.url__c;
+        for(Integer i=0; i<imageurlList.size(); i++){
+            String url = preSignedUrl+'/blog-'+referenceIdList[i]+'.png';
+            CloudFrontUrl.add(url);
+            record.Body__c = record.Body__c.replace(imageurlList[i], CloudFrontUrl[i]);
+        }
+        update record;
+    }
+    Public static void uploadImageOnS3(List<string> referenceIdList, List<Blob> blobList){
+        awsS3API__c apiUrl =  awsS3API__c.getValues('api');
+        String s3Api = apiUrl.url__c;
+        for(Integer j=0; j<referenceIdList.size(); j++){ 
+            String imgName = 'blog-'+referenceIdList[j]+'.png';
+            Http http = new Http();
+            HttpRequest request = new HttpRequest();
+            request.setEndpoint(s3Api+'/community/images');
+            request.setMethod('POST');
+            request.setHeader('Content-Type', 'application/json;charset=UTF-8');
+            request.setBody('{ "fileName": "'+imgName+'", "mime": "application/json" }');
+            HttpResponse response = http.send(request);
+            if(response.getStatusCode() != 200) {
+                System.debug('The status code returned was not expected: ' + response.getStatusCode() + ' ' + response.getStatus());
+            } else {
+                Map<String, Object> preSignedMap = (Map<String, Object>) JSON.deserializeUntyped(response.getBody());
+                string preSignedBody = (string)preSignedMap.get('body');
+                Map<String, Object> preSignedMapUrl = (Map<String, Object>) JSON.deserializeUntyped(preSignedBody);
+                String preSignedUrl = preSignedMapUrl.get('uploadUrl')+'';
+                Http http1 = new Http();
+                HttpRequest request1 = new HttpRequest();
+                request1.setMethod('PUT');
+                request1.setEndpoint(preSignedUrl);
+                request1.setHeader('Content-Length', '0');
+                request1.setHeader('Content-Type', 'image/jpeg');
+                request1.setBodyAsBlob(blobList[j]);
+                HttpResponse response1 = http1.send(request1);
+            }
+        }
+    }
+}
